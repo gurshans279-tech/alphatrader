@@ -127,6 +127,15 @@ def monte_carlo(t, n_sims=10000, horizon="day"):
     return {"win_rate": ht/n_sims, "loss_rate": hs/n_sims, "flat_rate": hn/n_sims,
             "n": n_sims, "target": target, "stop": stop}
 
+def expected_value(win_rate, loss_rate, entry, target, stop):
+    """EV per share = (win% x profit) - (loss% x loss). Positive = profitable edge."""
+    profit = target - entry
+    loss = entry - stop
+    if loss <= 0:
+        return 0
+    return (win_rate * profit) - (loss_rate * loss)
+
+
 def scan_day(t):
     df = load_intraday(t)
     if df.empty or len(df) < 20: return None
@@ -141,7 +150,7 @@ def scan_day(t):
     if score < 3: return None
     strat = "Momentum" if 50 < r < 70 else "Oversold Bounce"
     return {"symbol": t, "strategy": strat, "price": p, "score": score,
-            "rsi": r, "stop": p - 1.5*a, "target": p + 2.5*a}
+            "rsi": r, "stop": p - 1.5*a, "target": p + 3.0*a, "rr": 2.0}
 
 def scan_swing(t):
     df = load_daily(t)
@@ -164,7 +173,7 @@ def scan_swing(t):
     if p > df["High"].iloc[-21:-1].max() and last["Volume"] > avgvol * 1.3: score += 2
     if score < 3: return None
     return {"symbol": t, "price": p, "rsi": r, "score": score,
-            "sma20": s20, "sma50": s50, "stop": p - 2*a, "target": p + 4*a}
+            "sma20": s20, "sma50": s50, "stop": p - 2*a, "target": p + 4*a, "rr": 2.0}
 
 def run_scan(scan_fn):
     universe = get_universe()
@@ -250,10 +259,17 @@ with tab1:
             st.markdown("### 🎲 10,000 Simulations")
             tm = monte_carlo(d_sym, 10000, "day")
             if tm:
+                ev = expected_value(tm['win_rate'], tm['loss_rate'], p, tm['target'], tm['stop'])
                 m1, m2, m3 = st.columns(3)
                 m1.metric("🎯 Win Rate", f"{tm['win_rate']*100:.1f}%")
                 m2.metric("🛑 Loss Rate", f"{tm['loss_rate']*100:.1f}%")
-                m3.metric("⏰ Flat", f"{tm['flat_rate']*100:.1f}%")
+                m3.metric("📊 Expected Value", f"${ev:+.2f}")
+                if ev > 0:
+                    st.success(f"✅ POSITIVE EDGE: on average +${ev:.2f} profit per trade. TAKE IT.")
+                elif ev > -0.05:
+                    st.warning(f"⚖️ BREAK-EVEN: EV ${ev:+.2f}. Skip — not worth the risk.")
+                else:
+                    st.error(f"❌ NO EDGE: on average -${abs(ev):.2f} per trade. SKIP THIS.")
             st.markdown("### 📰 News")
             for n in fetch_news(d_sym):
                 st.markdown(f'<div class="news-row"><span class="news-src">{n["source"]}</span><span class="news-title">{n["title"]}</span></div>', unsafe_allow_html=True)
@@ -309,10 +325,17 @@ with tab2:
             st.markdown("### 🎲 10,000 Simulations (4-day)")
             tm = monte_carlo(s_sym, 10000, "swing")
             if tm:
+                ev = expected_value(tm['win_rate'], tm['loss_rate'], p, tm['target'], tm['stop'])
                 m1, m2, m3 = st.columns(3)
                 m1.metric("🎯 Win Rate", f"{tm['win_rate']*100:.1f}%")
                 m2.metric("🛑 Loss Rate", f"{tm['loss_rate']*100:.1f}%")
-                m3.metric("⏰ Flat", f"{tm['flat_rate']*100:.1f}%")
+                m3.metric("📊 Expected Value", f"${ev:+.2f}")
+                if ev > 0:
+                    st.success(f"✅ POSITIVE EDGE: +${ev:.2f} per trade on average. TAKE IT.")
+                elif ev > -0.05:
+                    st.warning(f"⚖️ BREAK-EVEN: EV ${ev:+.2f}. Skip.")
+                else:
+                    st.error(f"❌ NO EDGE: -${abs(ev):.2f} average loss. SKIP THIS.")
             st.markdown("### 📰 News")
             for n in fetch_news(s_sym):
                 st.markdown(f'<div class="news-row"><span class="news-src">{n["source"]}</span><span class="news-title">{n["title"]}</span></div>', unsafe_allow_html=True)
