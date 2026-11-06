@@ -2,306 +2,282 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import feedparser
 from datetime import datetime
-from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# ─── MODERN THEME ──────────────────────────────────────────────────────────────
+try:
+    from neonui import apply_theme
+    apply_theme("midnight")  # A clean, modern dark theme
+except ImportError:
+    st.warning("NeonUI not installed. Run: pip install neonui")
+
+# ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AlphaTrader Pro", page_icon="⚡", layout="wide")
 
-st.markdown("""
-<style>
-[data-testid="stAppViewContainer"], .stApp { background: radial-gradient(ellipse at top, #0f172a 0%, #050810 100%); }
-[data-testid="stSidebar"] { background: linear-gradient(180deg, #0a0e1a 0%, #141b2d 100%); border-right: 1px solid #1e293b; }
-h1, h2, h3, h4 { color: #f1f5f9 !important; font-weight: 800 !important; letter-spacing: -0.8px !important; }
-[data-testid="stMetricValue"] { color: #10b981 !important; font-family: 'SF Mono', Menlo, monospace !important; font-weight: 800 !important; font-size: 24px !important; }
-[data-testid="stMetricLabel"] { color: #64748b !important; text-transform: uppercase; font-size: 10px; letter-spacing: 1.5px; font-weight: 600; }
-.stButton > button[kind="primary"] { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: #000 !important; font-weight: 800; border: none; border-radius: 10px; padding: 14px 28px; box-shadow: 0 4px 20px rgba(16,185,129,0.4); }
-.stTabs [data-baseweb="tab-list"] { gap: 8px; background: transparent; border-bottom: 1px solid #1e293b; }
-.stTabs [data-baseweb="tab"] { background: transparent; color: #94a3b8; font-weight: 700; padding: 12px 24px; font-size: 16px; }
-.stTabs [aria-selected="true"] { color: #10b981 !important; border-bottom: 2px solid #10b981 !important; }
-.stTextInput input { background: #0f172a !important; color: #f1f5f9 !important; border: 1px solid #334155 !important; border-radius: 8px; }
-.glass { background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.02) 100%); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 24px; margin: 12px 0; }
-.badge { padding: 10px 24px; border-radius: 30px; font-weight: 900; font-size: 22px; display: inline-block; letter-spacing: 2px; font-family: 'SF Mono', Menlo, monospace; }
-.badge-buy { background: #10b981; color: #000; box-shadow: 0 0 40px rgba(16,185,129,0.5); }
-.badge-sell { background: #ef4444; color: #fff; box-shadow: 0 0 40px rgba(239,68,68,0.5); }
-.badge-hold { background: #f59e0b; color: #000; box-shadow: 0 0 40px rgba(245,158,11,0.4); }
-.news-row { padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.06); line-height: 1.4; }
-.news-src { color: #10b981; font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-right: 8px; }
-.news-title { color: #cbd5e1; font-size: 14px; }
-</style>
-""", unsafe_allow_html=True)
+# ─── DATA & CORE FUNCTIONS ───────────────────────────────────────────────────
+@st.cache_data(ttl=60)
+def get_sp500_tickers():
+    try:
+        table = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+        return table[0]["Symbol"].tolist()
+    except Exception:
+        # Fallback list if Wikipedia is unavailable
+        return ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "UNH", "JNJ"]
 
-def rsi(s, n=14):
-    d = s.diff()
-    g = d.clip(lower=0).ewm(alpha=1/n, adjust=False).mean()
-    l = (-d.clip(upper=0)).ewm(alpha=1/n, adjust=False).mean()
-    return 100 - (100 / (1 + g / l))
+@st.cache_data(ttl=15)
+def load_intraday(ticker):
+    try:
+        df = yf.download(ticker, period="2d", interval="5m", progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=300)
+def load_daily(ticker):
+    try:
+        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+def rsi(series, n=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1/n, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/n, adjust=False).mean()
+    return 100 - (100 / (1 + gain / loss))
 
 def atr(df, n=14):
-    tr = pd.concat([df["High"]-df["Low"],
-                    (df["High"]-df["Close"].shift()).abs(),
-                    (df["Low"]-df["Close"].shift()).abs()], axis=1).max(axis=1)
+    tr = pd.concat([df["High"] - df["Low"],
+                    (df["High"] - df["Close"].shift()).abs(),
+                    (df["Low"] - df["Close"].shift()).abs()], axis=1).max(axis=1)
     return tr.ewm(alpha=1/n, adjust=False).mean()
 
 def vwap(df):
-    tp = (df["High"]+df["Low"]+df["Close"])/3
-    return (tp*df["Volume"]).cumsum() / df["Volume"].cumsum()
+    typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
+    return (typical_price * df["Volume"]).cumsum() / df["Volume"].cumsum()
 
-@st.cache_data(ttl=60)
-def get_universe():
-    try:
-        t = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
-        return t[0]["Symbol"].tolist()
-    except:
-        return ["AAPL","NVDA","TSLA","AMD","MSFT","AMZN","META","GOOGL","NFLX","AVGO",
-                "COIN","PLTR","SOFI","MARA","HOOD","SNAP","UBER","SHOP","INTC","MU"]
-
-@st.cache_data(ttl=15)
-def load_intraday(t):
-    try:
-        df = yf.download(t, period="2d", interval="5m", progress=False, auto_adjust=True)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df
-    except:
-        return pd.DataFrame()
-
-@st.cache_data(ttl=300)
-def load_daily(t):
-    try:
-        df = yf.download(t, period="1y", interval="1d", progress=False, auto_adjust=True)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df
-    except:
-        return pd.DataFrame()
-
-@st.cache_data(ttl=300)
-def fetch_news(t, n=40):
-    out, seen = [], set()
-    for q in [f"{t} stock", f"{t} earnings", f"{t} analyst", f"{t} upgrade", f"{t} downgrade"]:
-        try:
-            url = f"https://news.google.com/rss/search?q={quote(q)}&hl=en-US&gl=US&ceid=US:en"
-            feed = feedparser.parse(url, request_headers={"User-Agent":"Mozilla/5.0"})
-            for e in feed.entries[:8]:
-                title = e.title
-                pub = title.rsplit(" - ", 1)[-1] if " - " in title else "Google News"
-                key = title.lower()[:45]
-                if key and key not in seen:
-                    seen.add(key); out.append({"source": pub, "title": title})
-        except: pass
-    try:
-        for i in (yf.Ticker(t).news or [])[:20]:
-            title = i.get("title", "")
-            key = title.lower()[:45]
-            if key and key not in seen:
-                seen.add(key); out.append({"source": i.get("publisher","Yahoo"), "title": title})
-    except: pass
-    return out[:n]
-
-def monte_carlo(t, n_sims=10000, horizon="day"):
-    df = load_intraday(t) if horizon == "day" else load_daily(t)
+def monte_carlo(symbol, horizon="day", n_sims=10000):
+    df = load_intraday(symbol) if horizon == "day" else load_daily(symbol)
     if df.empty or len(df) < 100:
         return None
-    rets = df["Close"].pct_change().dropna().values
-    last = float(df["Close"].iloc[-1]); a = float(atr(df).iloc[-1])
+    returns = df["Close"].pct_change().dropna().values
+    last_price = float(df["Close"].iloc[-1])
+    vol = float(atr(df).iloc[-1])
+
     if horizon == "day":
-        target, stop, bars = last + 3.0*a, last - 1.5*a, 78
+        target, stop, bars = last_price + 3.0 * vol, last_price - 1.5 * vol, 78
     else:
-        target, stop, bars = last + 4*a, last - 2*a, 4
-    rng = np.random.default_rng(42); ht = hs = hn = 0
+        target, stop, bars = last_price + 4 * vol, last_price - 2 * vol, 4
+
+    rng = np.random.default_rng(seed=42)
+    hits_target, hits_stop, neither = 0, 0, 0
+
     for _ in range(n_sims):
-        path = last * np.cumprod(1 + rng.choice(rets, bars))
-        for p in path:
-            if p >= target: ht += 1; break
-            if p <= stop: hs += 1; break
+        path = last_price * np.cumprod(1 + rng.choice(returns, bars))
+        for price in path:
+            if price >= target:
+                hits_target += 1
+                break
+            if price <= stop:
+                hits_stop += 1
+                break
         else:
-            hn += 1
-    ev = (ht/n_sims)*(target-last) - (hs/n_sims)*(last-stop)
-    return {"win_rate": ht/n_sims, "loss_rate": hs/n_sims, "flat_rate": hn/n_sims,
-            "n": n_sims, "target": target, "stop": stop, "ev": ev}
+            neither += 1
 
-def scan_day(t):
-    df = load_intraday(t)
-    if df.empty or len(df) < 20: return None
-    df["RSI"] = rsi(df["Close"]); df["VWAP"] = vwap(df); df["ATR"] = atr(df)
-    last = df.iloc[-1]
-    p, a, r, v = float(last["Close"]), float(last["ATR"]), float(last["RSI"]), float(last["VWAP"])
-    score = 0
-    if 50 < r < 70 and p > v: score += 3
-    if r < 35 and p > v: score += 2
-    if last["Volume"] > df["Volume"].tail(20).mean() * 1.5: score += 2
-    if p > df["Close"].ewm(span=20, adjust=False).mean().iloc[-1]: score += 1
-    if score < 3: return None
-    strat = "Momentum" if 50 < r < 70 else "Oversold Bounce"
-    return {"symbol": t, "strategy": strat, "price": p, "score": score,
-            "rsi": r, "stop": p - 1.5*a, "target": p + 3.0*a}
+    win_rate = hits_target / n_sims
+    loss_rate = hits_stop / n_sims
+    expected_value = (win_rate * (target - last_price)) - (loss_rate * (last_price - stop))
 
-def scan_swing(t):
-    df = load_daily(t)
-    if df.empty or len(df) < 60: return None
-    df["RSI"] = rsi(df["Close"])
-    df["SMA20"] = df["Close"].rolling(20).mean()
-    df["SMA50"] = df["Close"].rolling(50).mean()
-    df["SMA200"] = df["Close"].rolling(200).mean()
-    df["ATR"] = atr(df)
-    last = df.iloc[-1]
-    p, r, a = float(last["Close"]), float(last["RSI"]), float(last["ATR"])
-    s20, s50 = float(last["SMA20"]), float(last["SMA50"])
-    s200 = float(last["SMA200"]) if pd.notna(last["SMA200"]) else 0
-    score = 0
-    if p > s50: score += 2
-    if p > s20 and s20 > s50: score += 2
-    if r < 40: score += 1
-    if s200 and p > s200: score += 1
-    if p > df["High"].iloc[-21:-1].max(): score += 2
-    if score < 3: return None
-    return {"symbol": t, "price": p, "rsi": r, "score": score,
-            "sma20": s20, "sma50": s50, "stop": p - 2*a, "target": p + 4*a}
+    return {
+        "win_rate": win_rate, "loss_rate": loss_rate, "flat_rate": neither / n_sims,
+        "expected_value": expected_value, "target": target, "stop": stop, "n_sims": n_sims
+    }
 
-def run_scan(scan_fn):
-    universe = get_universe()
-    results = []
-    with ThreadPoolExecutor(max_workers=20) as ex:
-        futs = {ex.submit(scan_fn, t): t for t in universe}
-        for f in as_completed(futs):
-            try:
-                r = f.result(timeout=10)
-                if r: results.append(r)
-            except: pass
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:30]
-
-def get_fundamentals(t):
-    try:
-        info = yf.Ticker(t).info
-        return {"symbol": t, "name": (info.get("shortName") or t)[:18],
-                "price": info.get("currentPrice") or info.get("regularMarketPrice") or 0,
-                "pe": info.get("trailingPE"), "rev_growth": info.get("revenueGrowth"),
-                "earn_growth": info.get("earningsGrowth"), "profit_margin": info.get("profitMargins"),
-                "analyst_target": info.get("targetMeanPrice"),
-                "analyst_rec": info.get("recommendationKey", "N/A"),
-                "market_cap": info.get("marketCap") or 0}
-    except: return None
-
-def score_fund(f):
-    s = 0
-    rg = f.get("rev_growth") or 0; eg = f.get("earn_growth") or 0
-    pm = f.get("profit_margin") or 0; pe = f.get("pe") or 0
-    tgt = f.get("analyst_target") or 0; p = f.get("price") or 0
-    if rg > 0.15: s += 2
-    elif rg > 0.05: s += 1
-    if eg > 0.15: s += 2
-    elif eg > 0.05: s += 1
-    if pm > 0.15: s += 1
-    if tgt and p and tgt > p * 1.15: s += 2
-    if f.get("analyst_rec") in ("buy", "strong_buy"): s += 1
-    if pe and 5 < pe < 40: s += 1
-    return s
-
-def scan_funds():
-    universe = get_universe()
-    results = []
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        futs = {ex.submit(get_fundamentals, t): t for t in universe}
-        for f in as_completed(futs):
-            try:
-                r = f.result(timeout=20)
-                if r and r.get("price") and r.get("market_cap", 0) > 1e9:
-                    r["score"] = score_fund(r)
-                    if r["score"] >= 3: results.append(r)
-            except: pass
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:30]
-
+# ─── APP LAYOUT ──────────────────────────────────────────────────────────────
 st.sidebar.markdown("## ⚡ AlphaTrader Pro")
-st.sidebar.caption("Not financial advice. Scans S&P 500.")
-tab1, tab2, tab3 = st.tabs(["⚡ Day Trading", "📈 Swing Trading", "💰 Fundamentals"])
+st.sidebar.caption("Real-time market intelligence. Not financial advice.")
+st.sidebar.caption("Scans S&P 500. Free tier limit — not 10,000 stocks.")
 
-with tab1:
-    st.header("⚡ Day Trading")
-    st.caption("Live scanner, 15-second auto-refresh.")
+tab_day, tab_swing, tab_fund = st.tabs(["⚡ Day Trading", "📈 Swing Trading", "💰 Fundamentals"])
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1: DAY TRADING
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_day:
+    st.header("Day Trading · Live Scanner")
+    st.caption("Scanning S&P 500. Auto-refreshes every 15 seconds.")
+
     @st.fragment(run_every="15s")
-    def day_scanner():
-        results = run_scan(scan_day)
-        if not results:
-            st.warning("No high-conviction setups right now.")
-            return
-        st.success(f"✅ Found {len(results)} setups")
-        df = pd.DataFrame(results)
-        df["R:R"] = ((df["target"] - df["price"]) / (df["price"] - df["stop"])).round(1)
-        st.dataframe(df[["symbol","strategy","price","score","R:R","rsi","stop","target"]],
-                     use_container_width=True, hide_index=True)
-    day_scanner()
-    st.divider()
-    st.subheader("🔍 Deep Analysis")
-    d_sym = st.text_input("Ticker", "TSLA", key="d").upper()
-    if st.button("Analyze", key="da", type="primary"):
-        df = load_intraday(d_sym)
-        if df.empty:
-            st.error(f"No data for {d_sym}")
-        else:
-            df["RSI"] = rsi(df["Close"]); df["VWAP"] = vwap(df); df["ATR"] = atr(df)
-            ml = df["Close"].ewm(span=12, adjust=False).mean() - df["Close"].ewm(span=26, adjust=False).mean()
-            ms = ml.ewm(span=9, adjust=False).mean()
-            macd_up = ml.iloc[-1] > ms.iloc[-1]
-            last = df.iloc[-1]
-            p, a, r, v = float(last["Close"]), float(last["ATR"]), float(last["RSI"]), float(last["VWAP"])
-            sc = (2 if r<30 else -2 if r>70 else 0) + (2 if p>v else -2) + (2 if macd_up else -2)
-            verdict = "BUY" if sc>=3 else "SELL" if sc<=-3 else "HOLD"
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Price", f"${p:.2f}"); c2.metric("RSI", f"{r:.0f}")
-            c3.metric("VWAP", f"${v:.2f}"); c4.metric("ATR", f"${a:.2f}")
-            bc = "badge-buy" if verdict=="BUY" else "badge-sell" if verdict=="SELL" else "badge-hold"
-            st.markdown(f'<div class="glass"><span class="badge {bc}">{verdict}</span></div>', unsafe_allow_html=True)
-            st.markdown("### 🧠 Why")
-            out = []
-            if r < 30: out.append(f"RSI ({r:.0f}) oversold — bounce setup")
-            elif r > 70: out.append(f"RSI ({r:.0f}) overbought — pullback risk")
-            else: out.append(f"RSI ({r:.0f}) neutral")
-            out.append(f"Price {'above' if p>v else 'below'} VWAP (${v:.2f}) — {'buyers' if p>v else 'sellers'} in control")
-            out.append("MACD bullish — momentum confirms" if macd_up else "MACD bearish — momentum fading")
-            for line in out: st.markdown(f"- {line}")
-            st.markdown("### 💰 Price Levels")
-            st.write(f"**Buy** ${p-1.5*a:.2f} · **Stop** ${p-3.5*a:.2f} · **Target** ${p+3*a:.2f}")
-            st.markdown("### 🎲 10,000 Simulations")
-            tm = monte_carlo(d_sym, 10000, "day")
-            if tm:
-                m1, m2, m3 = st.columns(3)
-                m1.metric("🎯 Win Rate", f"{tm['win_rate']*100:.1f}%")
-                m2.metric("🛑 Loss Rate", f"{tm['loss_rate']*100:.1f}%")
-                m3.metric("📊 EV", f"${tm['ev']:+.2f}")
-                if tm['ev'] > 0:
-                    st.success(f"✅ POSITIVE EDGE: on average +${tm['ev']:.2f} per trade. TAKE IT.")
-                else:
-                    st.error(f"❌ NO EDGE: -${abs(tm['ev']):.2f} per trade. SKIP.")
-            st.markdown("### 📰 News")
-            for n in fetch_news(d_sym):
-                st.markdown(f'<div class="news-row"><span class="news-src">{n["source"]}</span><span class="news-title">{n["title"]}</span></div>', unsafe_allow_html=True)
+    def live_day_scanner():
+        tickers = get_sp500_tickers()
+        results = []
+        progress_bar = st.progress(0, text="Scanning for intraday setups...")
 
-with tab2:
-    st.header("📈 Swing Trading · 2-4 Day Holds")
-    st.caption("Live scanner, 60-second auto-refresh.")
-    @st.fragment(run_every="60s")
-    def swing_scanner():
-        results = run_scan(scan_swing)
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {executor.submit(load_intraday, ticker): ticker for ticker in tickers}
+            for i, future in enumerate(as_completed(futures)):
+                ticker = futures[future]
+                df = future.result()
+                if not df.empty and len(df) >= 20:
+                    df["RSI"] = rsi(df["Close"])
+                    df["VWAP"] = vwap(df)
+                    df["ATR"] = atr(df)
+                    last = df.iloc[-1]
+                    price, vol, rsi_val, vwap_val = float(last["Close"]), float(last["ATR"]), float(last["RSI"]), float(last["VWAP"])
+
+                    score = 0
+                    if 50 < rsi_val < 70 and price > vwap_val: score += 3
+                    if rsi_val < 35 and price > vwap_val: score += 2
+                    if last["Volume"] > df["Volume"].tail(20).mean() * 1.5: score += 2
+                    if price > df["Close"].ewm(span=20, adjust=False).mean().iloc[-1]: score += 1
+
+                    if score >= 3:
+                        results.append({
+                            "Symbol": ticker, "Strategy": "Momentum" if 50 < rsi_val < 70 else "Oversold Bounce",
+                            "Price": price, "Score": score, "RSI": rsi_val,
+                            "Stop": price - 1.5 * vol, "Target": price + 3.0 * vol
+                        })
+                progress_bar.progress((i + 1) / len(tickers), text=f"Scanned {i + 1}/{len(tickers)}")
+        progress_bar.empty()
+
         if not results:
-            st.warning("No swing setups right now.")
-            return
-        st.success(f"✅ Found {len(results)} swing setups")
-        df = pd.DataFrame(results)
-        df["R:R"] = ((df["target"] - df["price"]) / (df["price"] - df["stop"])).round(1)
-        st.dataframe(df[["symbol","price","score","R:R","rsi","stop","target"]],
-                     use_container_width=True, hide_index=True)
-    swing_scanner()
+            st.warning("No high-conviction intraday setups found right now.")
+        else:
+            results.sort(key=lambda x: x["Score"], reverse=True)
+            top_results = results[:30]
+            st.success(f"✅ Found {len(results)} setups. Showing top {len(top_results)}.")
+            df_results = pd.DataFrame(top_results)
+            df_results["R:R"] = ((df_results["Target"] - df_results["Price"]) / (df_results["Price"] - df_results["Stop"])).round(1)
+            st.dataframe(df_results[["Symbol", "Strategy", "Price", "Score", "R:R", "RSI", "Stop", "Target"]], use_container_width=True, hide_index=True)
+
+    live_day_scanner()
+
     st.divider()
-    st.subheader("🔍 Deep Analysis")
-    s_sym = st.text_input("Ticker", "AAPL", key="s").upper()
-    if st.button("Analyze", key="sa", type="primary"):
-        df = load_daily(s_sym)
+    st.subheader("🔍 Deep Analysis & Expected Value")
+    day_symbol = st.text_input("Enter ticker for day trade analysis", "TSLA", key="day_input").upper()
+
+    if st.button("Analyze Day Trade", key="day_btn", type="primary"):
+        df = load_intraday(day_symbol)
         if df.empty:
-            st.error(f"No data for {s_sym}")
+            st.error(f"No intraday data for {day_symbol}")
+        else:
+            df["RSI"] = rsi(df["Close"])
+            df["VWAP"] = vwap(df)
+            df["ATR"] = atr(df)
+            last = df.iloc[-1]
+            price, vol, rsi_val, vwap_val = float(last["Close"]), float(last["ATR"]), float(last["RSI"]), float(last["VWAP"])
+            macd_line = df["Close"].ewm(span=12, adjust=False).mean() - df["Close"].ewm(span=26, adjust=False).mean()
+            macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+            macd_up = macd_line.iloc[-1] > macd_signal.iloc[-1]
+
+            score = (2 if rsi_val < 30 else -2 if rsi_val > 70 else 0) + (2 if price > vwap_val else -2) + (2 if macd_up else -2)
+            verdict = "BUY" if score >= 3 else "SELL" if score <= -3 else "HOLD"
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Price", f"${price:.2f}")
+            col2.metric("RSI", f"{rsi_val:.0f}")
+            col3.metric("VWAP", f"${vwap_val:.2f}")
+            col4.metric("ATR", f"${vol:.2f}")
+
+            badge_class = "badge-buy" if verdict == "BUY" else "badge-sell" if verdict == "SELL" else "badge-hold"
+            st.markdown(f'<div style="text-align:center; margin: 20px 0;"><span class="badge {badge_class}">{verdict}</span></div>', unsafe_allow_html=True)
+
+            st.markdown("### 🧠 Trade Rationale")
+            reasons = []
+            if rsi_val < 30: reasons.append(f"RSI ({rsi_val:.0f}) is oversold, suggesting a potential bounce.")
+            elif rsi_val > 70: reasons.append(f"RSI ({rsi_val:.0f}) is overbought, suggesting a pullback risk.")
+            else: reasons.append(f"RSI ({rsi_val:.0f}) is neutral.")
+            reasons.append(f"Price is {'above' if price > vwap_val else 'below'} VWAP (${vwap_val:.2f}), indicating {'buying' if price > vwap_val else 'selling'} pressure.")
+            reasons.append("MACD is above its signal line, confirming bullish momentum." if macd_up else "MACD is below its signal line, indicating fading momentum.")
+            for reason in reasons:
+                st.markdown(f"- {reason}")
+
+            st.markdown("### 🎲 Probability & Expected Value (10,000 Simulations)")
+            mc_result = monte_carlo(day_symbol, "day")
+            if mc_result:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("🎯 Win Rate", f"{mc_result['win_rate']*100:.1f}%")
+                c2.metric("🛑 Loss Rate", f"{mc_result['loss_rate']*100:.1f}%")
+                ev = mc_result['expected_value']
+                c3.metric("📊 Expected Value", f"${ev:+.2f}")
+
+                if ev > 0:
+                    st.success(f"✅ POSITIVE EDGE: On average, this trade would have made **+${ev:.2f}** per share. The math is on your side.")
+                elif ev > -0.05:
+                    st.warning(f"⚖️ BREAK-EVEN: Expected value is **${ev:+.2f}**. The trade is essentially a coin flip. Skipping is the smarter play.")
+                else:
+                    st.error(f"❌ NO EDGE: On average, this trade would have lost **-${abs(ev):.2f}** per share. The math is against you. Do not take it.")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2: SWING TRADING
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_swing:
+    st.header("Swing Trading · 2-4 Day Holds")
+    st.caption("Scanning S&P 500. Auto-refreshes every 60 seconds.")
+
+    @st.fragment(run_every="60s")
+    def live_swing_scanner():
+        tickers = get_sp500_tickers()
+        results = []
+        progress_bar = st.progress(0, text="Scanning for swing setups...")
+
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {executor.submit(load_daily, ticker): ticker for ticker in tickers}
+            for i, future in enumerate(as_completed(futures)):
+                ticker = futures[future]
+                df = future.result()
+                if not df.empty and len(df) >= 60:
+                    df["RSI"] = rsi(df["Close"])
+                    df["SMA20"] = df["Close"].rolling(20).mean()
+                    df["SMA50"] = df["Close"].rolling(50).mean()
+                    df["SMA200"] = df["Close"].rolling(200).mean()
+                    df["ATR"] = atr(df)
+                    last = df.iloc[-1]
+                    price, rsi_val, vol = float(last["Close"]), float(last["RSI"]), float(last["ATR"])
+                    sma20, sma50 = float(last["SMA20"]), float(last["SMA50"])
+                    sma200 = float(last["SMA200"]) if pd.notna(last["SMA200"]) else 0
+
+                    score = 0
+                    if price > sma50: score += 2
+                    if price > sma20 and sma20 > sma50: score += 2
+                    if rsi_val < 40: score += 1
+                    if sma200 and price > sma200: score += 1
+                    if price > df["High"].iloc[-21:-1].max(): score += 2
+
+                    if score >= 4:
+                        results.append({
+                            "Symbol": ticker, "Price": price, "Score": score, "RSI": rsi_val,
+                            "20d SMA": sma20, "50d SMA": sma50,
+                            "Stop": price - 2 * vol, "Target": price + 4 * vol
+                        })
+                progress_bar.progress((i + 1) / len(tickers), text=f"Scanned {i + 1}/{len(tickers)}")
+        progress_bar.empty()
+
+        if not results:
+            st.warning("No swing setups found right now.")
+        else:
+            results.sort(key=lambda x: x["Score"], reverse=True)
+            top_results = results[:30]
+            st.success(f"✅ Found {len(results)} swing setups. Showing top {len(top_results)}.")
+            df_results = pd.DataFrame(top_results)
+            df_results["R:R"] = ((df_results["Target"] - df_results["Price"]) / (df_results["Price"] - df_results["Stop"])).round(1)
+            st.dataframe(df_results[["Symbol", "Price", "Score", "R:R", "RSI", "20d SMA", "50d SMA", "Stop", "Target"]], use_container_width=True, hide_index=True)
+
+    live_swing_scanner()
+
+    st.divider()
+    st.subheader("🔍 Deep Analysis & Expected Value")
+    swing_symbol = st.text_input("Enter ticker for swing analysis", "AAPL", key="swing_input").upper()
+
+    if st.button("Analyze Swing Trade", key="swing_btn", type="primary"):
+        df = load_daily(swing_symbol)
+        if df.empty:
+            st.error(f"No daily data for {swing_symbol}")
         else:
             df["RSI"] = rsi(df["Close"])
             df["SMA20"] = df["Close"].rolling(20).mean()
@@ -309,85 +285,148 @@ with tab2:
             df["SMA200"] = df["Close"].rolling(200).mean()
             df["ATR"] = atr(df)
             last = df.iloc[-1]
-            p, r, a = float(last["Close"]), float(last["RSI"]), float(last["ATR"])
-            s20, s50 = float(last["SMA20"]), float(last["SMA50"])
-            s200 = float(last["SMA200"]) if pd.notna(last["SMA200"]) else 0
-            sc = 0
-            if p > s50: sc += 2
-            if p > s20 and s20 > s50: sc += 2
-            if r < 40: sc += 1
-            if s200 and p > s200: sc += 1
-            verdict = "BUY" if sc>=4 else "SELL" if sc<=-2 else "HOLD"
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Price", f"${p:.2f}"); c2.metric("RSI", f"{r:.0f}")
-            c3.metric("20/50 SMA", f"${s20:.0f}/${s50:.0f}"); c4.metric("ATR", f"${a:.2f}")
-            bc = "badge-buy" if verdict=="BUY" else "badge-sell" if verdict=="SELL" else "badge-hold"
-            st.markdown(f'<div class="glass"><span class="badge {bc}">{verdict}</span></div>', unsafe_allow_html=True)
-            st.markdown("### 🧠 Why")
-            out = []
-            if p > s50: out.append(f"Price above 50-day SMA (${s50:.2f}) — medium-term uptrend")
-            else: out.append(f"Price below 50-day SMA (${s50:.2f}) — medium-term downtrend")
-            if s200 and p > s200: out.append(f"Price above 200-day SMA (${s200:.2f}) — long-term uptrend")
-            elif s200: out.append(f"Price below 200-day SMA (${s200:.2f}) — long-term weakness")
-            if r < 40: out.append(f"RSI ({r:.0f}) not overbought — room to run")
-            for line in out: st.markdown(f"- {line}")
-            st.markdown("### 💰 Price Levels")
-            st.write(f"**Buy** ${p-a:.2f} · **Stop** ${p-2.5*a:.2f} · **Target** ${p+4*a:.2f}")
-            st.markdown("### 🎲 10,000 Simulations (4-day)")
-            tm = monte_carlo(s_sym, 10000, "swing")
-            if tm:
-                m1, m2, m3 = st.columns(3)
-                m1.metric("🎯 Win Rate", f"{tm['win_rate']*100:.1f}%")
-                m2.metric("🛑 Loss Rate", f"{tm['loss_rate']*100:.1f}%")
-                m3.metric("📊 EV", f"${tm['ev']:+.2f}")
-                if tm['ev'] > 0: st.success(f"✅ POSITIVE EDGE: +${tm['ev']:.2f} per trade.")
-                else: st.error(f"❌ NO EDGE: -${abs(tm['ev']):.2f} per trade.")
-            st.markdown("### 📰 News")
-            for n in fetch_news(s_sym):
-                st.markdown(f'<div class="news-row"><span class="news-src">{n["source"]}</span><span class="news-title">{n["title"]}</span></div>', unsafe_allow_html=True)
+            price, rsi_val, vol = float(last["Close"]), float(last["RSI"]), float(last["ATR"])
+            sma20, sma50 = float(last["SMA20"]), float(last["SMA50"])
+            sma200 = float(last["SMA200"]) if pd.notna(last["SMA200"]) else 0
 
-with tab3:
-    st.header("💰 Fundamentals · Long-Term Quality")
-    st.caption("Revenue growth, earnings growth, analyst targets. This is what drives long-term returns.")
-    if st.button("🔍 SCAN FUNDAMENTALS", type="primary", key="fscan"):
-        with st.spinner("Pulling fundamentals for 500 stocks — 30-60 seconds..."):
-            results = scan_funds()
-        if not results:
-            st.warning("No stocks passed the screen.")
-        else:
-            st.success(f"✅ {len(results)} stocks with strong fundamentals")
-            df = pd.DataFrame(results)
-            df["upside"] = ((df["analyst_target"].fillna(0) - df["price"]) / df["price"].replace(0,1) * 100).round(1)
-            df["rev_pct"] = (df["rev_growth"].fillna(0) * 100).round(1)
-            df["earn_pct"] = (df["earn_growth"].fillna(0) * 100).round(1)
-            df["pe"] = df["pe"].fillna(0).round(1)
-            st.dataframe(df[["symbol","name","price","score","rev_pct","earn_pct","pe","upside","analyst_rec"]],
-                         use_container_width=True, hide_index=True)
+            score = 0
+            if price > sma50: score += 2
+            if price > sma20 and sma20 > sma50: score += 2
+            if rsi_val < 40: score += 1
+            if sma200 and price > sma200: score += 1
+            verdict = "BUY" if score >= 4 else "SELL" if score <= -2 else "HOLD"
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Price", f"${price:.2f}")
+            col2.metric("RSI", f"{rsi_val:.0f}")
+            col3.metric("20d / 50d SMA", f"${sma20:.0f} / ${sma50:.0f}")
+            col4.metric("ATR", f"${vol:.2f}")
+
+            badge_class = "badge-buy" if verdict == "BUY" else "badge-sell" if verdict == "SELL" else "badge-hold"
+            st.markdown(f'<div style="text-align:center; margin: 20px 0;"><span class="badge {badge_class}">{verdict}</span></div>', unsafe_allow_html=True)
+
+            st.markdown("### 🧠 Trade Rationale")
+            reasons = []
+            if price > sma50: reasons.append(f"Price is above the 50-day SMA (${sma50:.2f}), indicating a medium-term uptrend.")
+            else: reasons.append(f"Price is below the 50-day SMA (${sma50:.2f}), indicating a medium-term downtrend.")
+            if sma200 and price > sma200: reasons.append(f"Price is above the 200-day SMA (${sma200:.2f}), confirming a long-term uptrend.")
+            elif sma200: reasons.append(f"Price is below the 200-day SMA (${sma200:.2f}), signaling long-term weakness.")
+            if rsi_val < 40: reasons.append(f"RSI ({rsi_val:.0f}) is not overbought, leaving room for upside.")
+            for reason in reasons:
+                st.markdown(f"- {reason}")
+
+            st.markdown("### 🎲 Probability & Expected Value (10,000 Simulations, 4-Day Hold)")
+            mc_result = monte_carlo(swing_symbol, "swing")
+            if mc_result:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("🎯 Win Rate", f"{mc_result['win_rate']*100:.1f}%")
+                c2.metric("🛑 Loss Rate", f"{mc_result['loss_rate']*100:.1f}%")
+                ev = mc_result['expected_value']
+                c3.metric("📊 Expected Value", f"${ev:+.2f}")
+
+                if ev > 0:
+                    st.success(f"✅ POSITIVE EDGE: On average, this trade would have made **+${ev:.2f}** per share. The math is on your side.")
+                elif ev > -0.05:
+                    st.warning(f"⚖️ BREAK-EVEN: Expected value is **${ev:+.2f}**. Skipping is the smarter play.")
+                else:
+                    st.error(f"❌ NO EDGE: On average, this trade would have lost **-${abs(ev):.2f}** per share. The math is against you.")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3: FUNDAMENTALS
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_fund:
+    st.header("Fundamentals · Long-Term Quality")
+    st.caption("Scans S&P 500 for revenue growth, earnings growth, and analyst targets.")
+
+    if st.button("🔍 Run Fundamental Scan", type="primary", key="fund_scan"):
+        with st.spinner("Pulling fundamentals for 500 stocks — this may take 60 seconds..."):
+            tickers = get_sp500_tickers()
+            results = []
+
+            def get_fundamentals_data(ticker):
+                try:
+                    info = yf.Ticker(ticker).info
+                    return {
+                        "Symbol": ticker,
+                        "Name": (info.get("shortName") or ticker)[:18],
+                        "Price": info.get("currentPrice") or 0,
+                        "P/E": info.get("trailingPE"),
+                        "Rev Growth": info.get("revenueGrowth"),
+                        "Earn Growth": info.get("earningsGrowth"),
+                        "Margin": info.get("profitMargins"),
+                        "Analyst Target": info.get("targetMeanPrice"),
+                        "Recommendation": info.get("recommendationKey", "N/A"),
+                        "Market Cap": info.get("marketCap") or 0
+                    }
+                except Exception:
+                    return None
+
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(get_fundamentals_data, ticker): ticker for ticker in tickers}
+                for future in as_completed(futures):
+                    data = future.result()
+                    if data and data["Price"] > 0 and data["Market Cap"] > 1e9:
+                        score = 0
+                        if (data["Rev Growth"] or 0) > 0.15: score += 2
+                        elif (data["Rev Growth"] or 0) > 0.05: score += 1
+                        if (data["Earn Growth"] or 0) > 0.15: score += 2
+                        elif (data["Earn Growth"] or 0) > 0.05: score += 1
+                        if (data["Margin"] or 0) > 0.15: score += 1
+                        if data["Analyst Target"] and data["Price"] and data["Analyst Target"] > data["Price"] * 1.15: score += 2
+                        if data["Recommendation"] in ("buy", "strong_buy"): score += 1
+                        if data["P/E"] and 5 < data["P/E"] < 40: score += 1
+                        data["Score"] = score
+                        if score >= 3:
+                            results.append(data)
+
+            if not results:
+                st.warning("No stocks passed the fundamental screen.")
+            else:
+                results.sort(key=lambda x: x["Score"], reverse=True)
+                top_results = results[:30]
+                st.success(f"✅ Found {len(results)} fundamentally strong stocks. Showing top {len(top_results)}.")
+                df_results = pd.DataFrame(top_results)
+                df_results["Upside %"] = ((df_results["Analyst Target"].fillna(0) - df_results["Price"]) / df_results["Price"].replace(0, 1) * 100).round(1)
+                df_results["Rev Growth %"] = (df_results["Rev Growth"].fillna(0) * 100).round(1)
+                df_results["Earn Growth %"] = (df_results["Earn Growth"].fillna(0) * 100).round(1)
+                st.dataframe(df_results[["Symbol", "Name", "Price", "Score", "Rev Growth %", "Earn Growth %", "P/E", "Upside %", "Recommendation"]], use_container_width=True, hide_index=True)
+
     st.divider()
-    st.subheader("🔍 Deep Dive")
-    f_sym = st.text_input("Ticker", "NVDA", key="fsym").upper()
-    if st.button("Analyze Fundamentals", key="fa", type="primary"):
-        f = get_fundamentals(f_sym)
-        if not f: st.error(f"No fundamentals for {f_sym}")
+    st.subheader("🔍 Deep Dive on a Single Ticker")
+    fund_symbol = st.text_input("Enter ticker", "NVDA", key="fund_input").upper()
+
+    if st.button("Analyze Fundamentals", key="fund_btn", type="primary"):
+        info = yf.Ticker(fund_symbol).info
+        if not info:
+            st.error(f"No fundamental data for {fund_symbol}")
         else:
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Price", f"${f.get('price') or 0:.2f}")
-            c2.metric("P/E", f"{f.get('pe') or 0:.1f}")
-            c3.metric("Revenue YoY", f"{(f.get('rev_growth') or 0)*100:.1f}%")
-            c4.metric("Earnings YoY", f"{(f.get('earn_growth') or 0)*100:.1f}%")
-            if f.get("analyst_target") and f.get("price"):
-                up = (f["analyst_target"] - f["price"]) / f["price"] * 100
-                st.metric("Analyst Target", f"${f['analyst_target']:.2f}", f"{up:+.1f}%")
-            st.markdown("### 🧠 What the numbers say")
-            rg = f.get("rev_growth") or 0; eg = f.get("earn_growth") or 0
-            pm = f.get("profit_margin") or 0; tgt = f.get("analyst_target") or 0; p = f.get("price") or 0
-            if rg > 0.15: st.markdown(f"- Revenue up **{rg*100:.0f}%** YoY — growing fast")
-            elif rg < 0: st.markdown(f"- Revenue **down {abs(rg)*100:.0f}%** YoY — shrinking")
-            if eg > 0.15: st.markdown(f"- Earnings up **{eg*100:.0f}%** YoY — profits expanding")
-            elif eg < -0.05: st.markdown(f"- Earnings **down {abs(eg)*100:.0f}%** YoY — falling")
-            if pm > 0.20: st.markdown(f"- Net margin **{pm*100:.0f}%** — strong pricing power")
-            if tgt and p:
-                up = (tgt - p) / p * 100
-                if up > 15: st.markdown(f"- Analysts see **{up:.0f}% upside** (target ${tgt:.2f})")
-                elif up < -10: st.markdown(f"- Analysts see **{abs(up):.0f}% downside** (target ${tgt:.2f})")
-            st.caption("⚠️ These are facts about the business today. They don't predict tomorrow's price.")
+            c1.metric("Price", f"${info.get('currentPrice') or 0:.2f}")
+            c2.metric("P/E Ratio", f"{info.get('trailingPE') or 0:.1f}")
+            c3.metric("Revenue Growth YoY", f"{(info.get('revenueGrowth') or 0)*100:.1f}%")
+            c4.metric("Earnings Growth YoY", f"{(info.get('earningsGrowth') or 0)*100:.1f}%")
+
+            if info.get("targetMeanPrice") and info.get("currentPrice"):
+                upside = (info["targetMeanPrice"] - info["currentPrice"]) / info["currentPrice"] * 100
+                st.metric("Analyst Consensus Target", f"${info['targetMeanPrice']:.2f}", f"{upside:+.1f}% Upside")
+
+            st.markdown("### 🧠 What the Numbers Say")
+            reasons = []
+            rev_growth = info.get("revenueGrowth") or 0
+            earn_growth = info.get("earningsGrowth") or 0
+            margin = info.get("profitMargins") or 0
+            target = info.get("targetMeanPrice") or 0
+            price = info.get("currentPrice") or 0
+
+            if rev_growth > 0.15: reasons.append(f"Revenue is up **{rev_growth*100:.0f}%** year-over-year — the business is growing fast.")
+            elif rev_growth < 0: reasons.append(f"Revenue is **down {abs(rev_growth)*100:.0f}%** year-over-year — the business is shrinking.")
+            if earn_growth > 0.15: reasons.append(f"Earnings are up **{earn_growth*100:.0f}%** year-over-year — profits are expanding.")
+            elif earn_growth < -0.05: reasons.append(f"Earnings are **down {abs(earn_growth)*100:.0f}%** year-over-year — profitability is falling.")
+            if margin > 0.20: reasons.append(f"Net profit margin is **{margin*100:.0f}%** — strong pricing power.")
+            if target and price:
+                if upside > 15: reasons.append(f"Analysts see **{upside:.0f}% upside** (average target ${target:.2f}).")
+                elif upside < -10: reasons.append(f"Analysts see **{abs(upside):.0f}% downside** (average target ${target:.2f}).")
+            for reason in reasons:
+                st.markdown(f"- {reason}")
+
+            st.caption("⚠️ These are facts about the business today. They do not predict tomorrow's stock price.")
