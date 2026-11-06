@@ -4,3 +4,4 @@ pandas
 numpy
 feedparser
 streamlit-autorefresh
+neonui
