@@ -211,7 +211,7 @@ def rationale_swing(p, r, s20, s50, s200):
 
 st.sidebar.markdown("## ⚡ AlphaTrader Pro")
 st.sidebar.caption("Not financial advice. Scans S&P 500. 500 stocks, not 10,000.")
-tab1, tab2 = st.tabs(["⚡ Day Trading", "📈 Swing Trading"])
+tab1, tab2, tab3 = st.tabs(["⚡ Day Trading", "📈 Swing Trading", "💰 Fundamentals"])
 
 with tab1:
     st.header("⚡ Day Trading")
@@ -339,3 +339,120 @@ with tab2:
             st.markdown("### 📰 News")
             for n in fetch_news(s_sym):
                 st.markdown(f'<div class="news-row"><span class="news-src">{n["source"]}</span><span class="news-title">{n["title"]}</span></div>', unsafe_allow_html=True)
+
+
+def get_fundamentals(t):
+    try:
+        info = yf.Ticker(t).info
+        return {
+            "symbol": t,
+            "name": (info.get("shortName") or t)[:18],
+            "price": info.get("currentPrice") or info.get("regularMarketPrice") or 0,
+            "pe": info.get("trailingPE"),
+            "fwd_pe": info.get("forwardPE"),
+            "rev_growth": info.get("revenueGrowth"),
+            "earn_growth": info.get("earningsGrowth"),
+            "profit_margin": info.get("profitMargins"),
+            "analyst_target": info.get("targetMeanPrice"),
+            "analyst_rec": info.get("recommendationKey", "N/A"),
+            "market_cap": info.get("marketCap") or 0,
+        }
+    except:
+        return None
+
+def score_fund(f):
+    s = 0
+    rg = f.get("rev_growth") or 0
+    eg = f.get("earn_growth") or 0
+    pm = f.get("profit_margin") or 0
+    pe = f.get("pe") or 0
+    tgt = f.get("analyst_target") or 0
+    p = f.get("price") or 0
+    if rg > 0.15: s += 2
+    elif rg > 0.05: s += 1
+    if eg > 0.15: s += 2
+    elif eg > 0.05: s += 1
+    if pm > 0.15: s += 1
+    if tgt and p and tgt > p * 1.15: s += 2
+    if f.get("analyst_rec") in ("buy", "strong_buy"): s += 1
+    if pe and 5 < pe < 40: s += 1
+    return s
+
+def scan_funds():
+    universe = get_universe()
+    results = []
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futs = {ex.submit(get_fundamentals, t): t for t in universe}
+        for f in as_completed(futs):
+            try:
+                r = f.result(timeout=20)
+                if r and r.get("price") and r.get("market_cap", 0) > 1e9:
+                    r["score"] = score_fund(r)
+                    if r["score"] >= 3:
+                        results.append(r)
+            except:
+                pass
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:30]
+
+with tab3:
+    st.header("💰 Fundamentals · Long-Term Quality")
+    st.caption("Scans S&P 500 on revenue growth, earnings growth, margins, analyst upside. This is what actually drives long-term returns.")
+    if st.button("🔍 SCAN FUNDAMENTALS", type="primary", key="fscan"):
+        with st.spinner("Pulling fundamentals for 500 stocks — 30 to 60 seconds..."):
+            results = scan_funds()
+        if not results:
+            st.warning("No stocks passed the screen. Market may be closed or data unavailable.")
+        else:
+            st.success(f"✅ {len(results)} stocks with strong fundamentals")
+            df = pd.DataFrame(results)
+            df["upside"] = ((df["analyst_target"].fillna(0) - df["price"]) / df["price"].replace(0,1) * 100).round(1)
+            df["rev_pct"] = (df["rev_growth"].fillna(0) * 100).round(1)
+            df["earn_pct"] = (df["earn_growth"].fillna(0) * 100).round(1)
+            df["pe"] = df["pe"].fillna(0).round(1)
+            disp = df[["symbol","name","price","score","rev_pct","earn_pct","pe","upside","analyst_rec"]]
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+            st.caption("rev_pct / earn_pct = YoY growth %. upside = % gap to analyst target.")
+    st.divider()
+    st.subheader("🔍 Deep Dive on One Ticker")
+    f_sym = st.text_input("Ticker", "NVDA", key="fsym").upper()
+    if st.button("Analyze Fundamentals", key="fa", type="primary"):
+        f = get_fundamentals(f_sym)
+        if not f:
+            st.error(f"No fundamentals for {f_sym}")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Price", f"${f.get('price') or 0:.2f}")
+            c2.metric("P/E", f"{f.get('pe') or 0:.1f}")
+            c3.metric("Revenue YoY", f"{(f.get('rev_growth') or 0)*100:.1f}%")
+            c4.metric("Earnings YoY", f"{(f.get('earn_growth') or 0)*100:.1f}%")
+            if f.get("analyst_target") and f.get("price"):
+                up = (f["analyst_target"] - f["price"]) / f["price"] * 100
+                st.metric("Analyst Target", f"${f['analyst_target']:.2f}", f"{up:+.1f}%")
+            st.markdown("### 🧠 What the numbers say")
+            rg = f.get("rev_growth") or 0
+            eg = f.get("earn_growth") or 0
+            pm = f.get("profit_margin") or 0
+            tgt = f.get("analyst_target") or 0
+            p = f.get("price") or 0
+            if rg > 0.15:
+                st.markdown(f"- Revenue up **{rg*100:.0f}%** YoY — business is growing fast")
+            elif rg > 0.05:
+                st.markdown(f"- Revenue up **{rg*100:.0f}%** YoY — steady growth")
+            elif rg < 0:
+                st.markdown(f"- Revenue **down {abs(rg)*100:.0f}%** YoY — business shrinking")
+            if eg > 0.15:
+                st.markdown(f"- Earnings up **{eg*100:.0f}%** YoY — profits expanding")
+            elif eg < -0.05:
+                st.markdown(f"- Earnings **down {abs(eg)*100:.0f}%** YoY — profitability falling")
+            if pm > 0.20:
+                st.markdown(f"- Net margin **{pm*100:.0f}%** — strong pricing power")
+            if tgt and p:
+                up = (tgt - p) / p * 100
+                if up > 15:
+                    st.markdown(f"- Analysts see **{up:.0f}% upside** (target ${tgt:.2f}) — Wall Street is bullish")
+                elif up < -10:
+                    st.markdown(f"- Analysts see **{abs(up):.0f}% downside** (target ${tgt:.2f}) — Wall Street is bearish")
+            st.markdown("### ⚠️ What this does NOT say")
+            st.caption("These are facts about the business today. They do not predict tomorrow's price. Even great businesses can drop 30% in a bad market.")
+
