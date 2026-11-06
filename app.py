@@ -12,18 +12,14 @@ st.set_page_config(page_title="AlphaTrader Pro", page_icon="⚡", layout="wide")
 st.markdown("""
 <style>
 [data-testid="stAppViewContainer"], .stApp { background: radial-gradient(ellipse at top, #0f172a 0%, #050810 100%); }
-[data-testid="stHeader"] { background: rgba(0,0,0,0); }
 [data-testid="stSidebar"] { background: linear-gradient(180deg, #0a0e1a 0%, #141b2d 100%); border-right: 1px solid #1e293b; }
 h1, h2, h3, h4 { color: #f1f5f9 !important; font-weight: 800 !important; letter-spacing: -0.8px !important; }
-[data-testid="stMetricValue"] { color: #10b981 !important; font-family: 'SF Mono', Menlo, monospace !important; font-weight: 800 !important; font-size: 26px !important; }
+[data-testid="stMetricValue"] { color: #10b981 !important; font-family: 'SF Mono', Menlo, monospace !important; font-weight: 800 !important; font-size: 24px !important; }
 [data-testid="stMetricLabel"] { color: #64748b !important; text-transform: uppercase; font-size: 10px; letter-spacing: 1.5px; font-weight: 600; }
 .stButton > button[kind="primary"] { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: #000 !important; font-weight: 800; border: none; border-radius: 10px; padding: 14px 28px; box-shadow: 0 4px 20px rgba(16,185,129,0.4); }
-.stButton > button[kind="primary"]:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(16,185,129,0.6); }
-.stButton > button { background: #1e293b; color: #f1f5f9 !important; border: 1px solid #334155; border-radius: 10px; font-weight: 600; }
 .stTabs [data-baseweb="tab-list"] { gap: 8px; background: transparent; border-bottom: 1px solid #1e293b; }
-.stTabs [data-baseweb="tab"] { background: transparent; color: #94a3b8; font-weight: 700; padding: 12px 24px; font-size: 16px; border: none; }
+.stTabs [data-baseweb="tab"] { background: transparent; color: #94a3b8; font-weight: 700; padding: 12px 24px; font-size: 16px; }
 .stTabs [aria-selected="true"] { color: #10b981 !important; border-bottom: 2px solid #10b981 !important; }
-div[data-testid="stDataFrame"] { border: 1px solid #1e293b; border-radius: 12px; overflow: hidden; }
 .stTextInput input { background: #0f172a !important; color: #f1f5f9 !important; border: 1px solid #334155 !important; border-radius: 8px; }
 .glass { background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.02) 100%); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 24px; margin: 12px 0; }
 .badge { padding: 10px 24px; border-radius: 30px; font-weight: 900; font-size: 22px; display: inline-block; letter-spacing: 2px; font-family: 'SF Mono', Menlo, monospace; }
@@ -94,16 +90,14 @@ def fetch_news(t, n=40):
                 key = title.lower()[:45]
                 if key and key not in seen:
                     seen.add(key); out.append({"source": pub, "title": title})
-        except:
-            pass
+        except: pass
     try:
         for i in (yf.Ticker(t).news or [])[:20]:
             title = i.get("title", "")
             key = title.lower()[:45]
             if key and key not in seen:
                 seen.add(key); out.append({"source": i.get("publisher","Yahoo"), "title": title})
-    except:
-        pass
+    except: pass
     return out[:n]
 
 def monte_carlo(t, n_sims=10000, horizon="day"):
@@ -113,7 +107,7 @@ def monte_carlo(t, n_sims=10000, horizon="day"):
     rets = df["Close"].pct_change().dropna().values
     last = float(df["Close"].iloc[-1]); a = float(atr(df).iloc[-1])
     if horizon == "day":
-        target, stop, bars = last + 2.5*a, last - 1.5*a, 78
+        target, stop, bars = last + 3.0*a, last - 1.5*a, 78
     else:
         target, stop, bars = last + 4*a, last - 2*a, 4
     rng = np.random.default_rng(42); ht = hs = hn = 0
@@ -124,17 +118,9 @@ def monte_carlo(t, n_sims=10000, horizon="day"):
             if p <= stop: hs += 1; break
         else:
             hn += 1
+    ev = (ht/n_sims)*(target-last) - (hs/n_sims)*(last-stop)
     return {"win_rate": ht/n_sims, "loss_rate": hs/n_sims, "flat_rate": hn/n_sims,
-            "n": n_sims, "target": target, "stop": stop}
-
-def expected_value(win_rate, loss_rate, entry, target, stop):
-    """EV per share = (win% x profit) - (loss% x loss). Positive = profitable edge."""
-    profit = target - entry
-    loss = entry - stop
-    if loss <= 0:
-        return 0
-    return (win_rate * profit) - (loss_rate * loss)
-
+            "n": n_sims, "target": target, "stop": stop, "ev": ev}
 
 def scan_day(t):
     df = load_intraday(t)
@@ -150,7 +136,7 @@ def scan_day(t):
     if score < 3: return None
     strat = "Momentum" if 50 < r < 70 else "Oversold Bounce"
     return {"symbol": t, "strategy": strat, "price": p, "score": score,
-            "rsi": r, "stop": p - 1.5*a, "target": p + 3.0*a, "rr": 2.0}
+            "rsi": r, "stop": p - 1.5*a, "target": p + 3.0*a}
 
 def scan_swing(t):
     df = load_daily(t)
@@ -164,16 +150,15 @@ def scan_swing(t):
     p, r, a = float(last["Close"]), float(last["RSI"]), float(last["ATR"])
     s20, s50 = float(last["SMA20"]), float(last["SMA50"])
     s200 = float(last["SMA200"]) if pd.notna(last["SMA200"]) else 0
-    avgvol = df["Volume"].tail(20).mean()
     score = 0
     if p > s50: score += 2
     if p > s20 and s20 > s50: score += 2
     if r < 40: score += 1
     if s200 and p > s200: score += 1
-    if p > df["High"].iloc[-21:-1].max() and last["Volume"] > avgvol * 1.3: score += 2
+    if p > df["High"].iloc[-21:-1].max(): score += 2
     if score < 3: return None
     return {"symbol": t, "price": p, "rsi": r, "score": score,
-            "sma20": s20, "sma50": s50, "stop": p - 2*a, "target": p + 4*a, "rr": 2.0}
+            "sma20": s20, "sma50": s50, "stop": p - 2*a, "target": p + 4*a}
 
 def run_scan(scan_fn):
     universe = get_universe()
@@ -188,43 +173,64 @@ def run_scan(scan_fn):
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:30]
 
-def rationale_day(p, r, v, macd_up, s20, s50):
-    out = []
-    if r < 30: out.append(f"RSI ({r:.0f}) oversold — bounce setup")
-    elif r > 70: out.append(f"RSI ({r:.0f}) overbought — pullback risk")
-    else: out.append(f"RSI ({r:.0f}) neutral — no extreme")
-    out.append(f"Price {'above' if p>v else 'below'} VWAP (${v:.2f}) — {'buyers' if p>v else 'sellers'} in control")
-    out.append("MACD bullish — momentum confirms" if macd_up else "MACD bearish — momentum fading")
-    if p > s20 and s20 > s50: out.append("Moving averages stacked up — bullish alignment")
-    elif p < s20 and s20 < s50: out.append("Moving averages stacked down — bearish alignment")
-    return out
+def get_fundamentals(t):
+    try:
+        info = yf.Ticker(t).info
+        return {"symbol": t, "name": (info.get("shortName") or t)[:18],
+                "price": info.get("currentPrice") or info.get("regularMarketPrice") or 0,
+                "pe": info.get("trailingPE"), "rev_growth": info.get("revenueGrowth"),
+                "earn_growth": info.get("earningsGrowth"), "profit_margin": info.get("profitMargins"),
+                "analyst_target": info.get("targetMeanPrice"),
+                "analyst_rec": info.get("recommendationKey", "N/A"),
+                "market_cap": info.get("marketCap") or 0}
+    except: return None
 
-def rationale_swing(p, r, s20, s50, s200):
-    out = []
-    if p > s50: out.append(f"Price above 50-day SMA (${s50:.2f}) — medium-term uptrend")
-    else: out.append(f"Price below 50-day SMA (${s50:.2f}) — medium-term downtrend")
-    if s200 and p > s200: out.append(f"Price above 200-day SMA (${s200:.2f}) — long-term uptrend")
-    elif s200: out.append(f"Price below 200-day SMA (${s200:.2f}) — long-term weakness")
-    if r < 40: out.append(f"RSI ({r:.0f}) not overbought — room to run")
-    elif r > 70: out.append(f"RSI ({r:.0f}) overbought — pullback risk")
-    return out
+def score_fund(f):
+    s = 0
+    rg = f.get("rev_growth") or 0; eg = f.get("earn_growth") or 0
+    pm = f.get("profit_margin") or 0; pe = f.get("pe") or 0
+    tgt = f.get("analyst_target") or 0; p = f.get("price") or 0
+    if rg > 0.15: s += 2
+    elif rg > 0.05: s += 1
+    if eg > 0.15: s += 2
+    elif eg > 0.05: s += 1
+    if pm > 0.15: s += 1
+    if tgt and p and tgt > p * 1.15: s += 2
+    if f.get("analyst_rec") in ("buy", "strong_buy"): s += 1
+    if pe and 5 < pe < 40: s += 1
+    return s
+
+def scan_funds():
+    universe = get_universe()
+    results = []
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futs = {ex.submit(get_fundamentals, t): t for t in universe}
+        for f in as_completed(futs):
+            try:
+                r = f.result(timeout=20)
+                if r and r.get("price") and r.get("market_cap", 0) > 1e9:
+                    r["score"] = score_fund(r)
+                    if r["score"] >= 3: results.append(r)
+            except: pass
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:30]
 
 st.sidebar.markdown("## ⚡ AlphaTrader Pro")
-st.sidebar.caption("Not financial advice. Scans S&P 500. 500 stocks, not 10,000.")
+st.sidebar.caption("Not financial advice. Scans S&P 500.")
 tab1, tab2, tab3 = st.tabs(["⚡ Day Trading", "📈 Swing Trading", "💰 Fundamentals"])
 
 with tab1:
     st.header("⚡ Day Trading")
-    st.caption("Scanning the S&P 500. Auto-refresh 15s.")
+    st.caption("Live scanner, 15-second auto-refresh.")
     @st.fragment(run_every="15s")
     def day_scanner():
         results = run_scan(scan_day)
         if not results:
-            st.warning("No high-conviction setups right now. Market conditions not aligned.")
+            st.warning("No high-conviction setups right now.")
             return
         st.success(f"✅ Found {len(results)} setups")
         df = pd.DataFrame(results)
-        df["R:R"] = (df["target"] - df["price"]) / (df["price"] - df["stop"])
+        df["R:R"] = ((df["target"] - df["price"]) / (df["price"] - df["stop"])).round(1)
         st.dataframe(df[["symbol","strategy","price","score","R:R","rsi","stop","target"]],
                      use_container_width=True, hide_index=True)
     day_scanner()
@@ -250,33 +256,33 @@ with tab1:
             bc = "badge-buy" if verdict=="BUY" else "badge-sell" if verdict=="SELL" else "badge-hold"
             st.markdown(f'<div class="glass"><span class="badge {bc}">{verdict}</span></div>', unsafe_allow_html=True)
             st.markdown("### 🧠 Why")
-            s20 = float(df["Close"].ewm(span=20, adjust=False).mean().iloc[-1])
-            s50 = float(df["Close"].ewm(span=50, adjust=False).mean().iloc[-1])
-            for line in rationale_day(p, r, v, macd_up, s20, s50):
-                st.markdown(f"- {line}")
+            out = []
+            if r < 30: out.append(f"RSI ({r:.0f}) oversold — bounce setup")
+            elif r > 70: out.append(f"RSI ({r:.0f}) overbought — pullback risk")
+            else: out.append(f"RSI ({r:.0f}) neutral")
+            out.append(f"Price {'above' if p>v else 'below'} VWAP (${v:.2f}) — {'buyers' if p>v else 'sellers'} in control")
+            out.append("MACD bullish — momentum confirms" if macd_up else "MACD bearish — momentum fading")
+            for line in out: st.markdown(f"- {line}")
             st.markdown("### 💰 Price Levels")
             st.write(f"**Buy** ${p-1.5*a:.2f} · **Stop** ${p-3.5*a:.2f} · **Target** ${p+3*a:.2f}")
             st.markdown("### 🎲 10,000 Simulations")
             tm = monte_carlo(d_sym, 10000, "day")
             if tm:
-                ev = expected_value(tm['win_rate'], tm['loss_rate'], p, tm['target'], tm['stop'])
                 m1, m2, m3 = st.columns(3)
                 m1.metric("🎯 Win Rate", f"{tm['win_rate']*100:.1f}%")
                 m2.metric("🛑 Loss Rate", f"{tm['loss_rate']*100:.1f}%")
-                m3.metric("📊 Expected Value", f"${ev:+.2f}")
-                if ev > 0:
-                    st.success(f"✅ POSITIVE EDGE: on average +${ev:.2f} profit per trade. TAKE IT.")
-                elif ev > -0.05:
-                    st.warning(f"⚖️ BREAK-EVEN: EV ${ev:+.2f}. Skip — not worth the risk.")
+                m3.metric("📊 EV", f"${tm['ev']:+.2f}")
+                if tm['ev'] > 0:
+                    st.success(f"✅ POSITIVE EDGE: on average +${tm['ev']:.2f} per trade. TAKE IT.")
                 else:
-                    st.error(f"❌ NO EDGE: on average -${abs(ev):.2f} per trade. SKIP THIS.")
+                    st.error(f"❌ NO EDGE: -${abs(tm['ev']):.2f} per trade. SKIP.")
             st.markdown("### 📰 News")
             for n in fetch_news(d_sym):
                 st.markdown(f'<div class="news-row"><span class="news-src">{n["source"]}</span><span class="news-title">{n["title"]}</span></div>', unsafe_allow_html=True)
 
 with tab2:
     st.header("📈 Swing Trading · 2-4 Day Holds")
-    st.caption("Scanning S&P 500 for multi-day setups.")
+    st.caption("Live scanner, 60-second auto-refresh.")
     @st.fragment(run_every="60s")
     def swing_scanner():
         results = run_scan(scan_swing)
@@ -285,7 +291,7 @@ with tab2:
             return
         st.success(f"✅ Found {len(results)} swing setups")
         df = pd.DataFrame(results)
-        df["R:R"] = (df["target"] - df["price"]) / (df["price"] - df["stop"])
+        df["R:R"] = ((df["target"] - df["price"]) / (df["price"] - df["stop"])).round(1)
         st.dataframe(df[["symbol","price","score","R:R","rsi","stop","target"]],
                      use_container_width=True, hide_index=True)
     swing_scanner()
@@ -318,91 +324,36 @@ with tab2:
             bc = "badge-buy" if verdict=="BUY" else "badge-sell" if verdict=="SELL" else "badge-hold"
             st.markdown(f'<div class="glass"><span class="badge {bc}">{verdict}</span></div>', unsafe_allow_html=True)
             st.markdown("### 🧠 Why")
-            for line in rationale_swing(p, r, s20, s50, s200):
-                st.markdown(f"- {line}")
+            out = []
+            if p > s50: out.append(f"Price above 50-day SMA (${s50:.2f}) — medium-term uptrend")
+            else: out.append(f"Price below 50-day SMA (${s50:.2f}) — medium-term downtrend")
+            if s200 and p > s200: out.append(f"Price above 200-day SMA (${s200:.2f}) — long-term uptrend")
+            elif s200: out.append(f"Price below 200-day SMA (${s200:.2f}) — long-term weakness")
+            if r < 40: out.append(f"RSI ({r:.0f}) not overbought — room to run")
+            for line in out: st.markdown(f"- {line}")
             st.markdown("### 💰 Price Levels")
             st.write(f"**Buy** ${p-a:.2f} · **Stop** ${p-2.5*a:.2f} · **Target** ${p+4*a:.2f}")
             st.markdown("### 🎲 10,000 Simulations (4-day)")
             tm = monte_carlo(s_sym, 10000, "swing")
             if tm:
-                ev = expected_value(tm['win_rate'], tm['loss_rate'], p, tm['target'], tm['stop'])
                 m1, m2, m3 = st.columns(3)
                 m1.metric("🎯 Win Rate", f"{tm['win_rate']*100:.1f}%")
                 m2.metric("🛑 Loss Rate", f"{tm['loss_rate']*100:.1f}%")
-                m3.metric("📊 Expected Value", f"${ev:+.2f}")
-                if ev > 0:
-                    st.success(f"✅ POSITIVE EDGE: +${ev:.2f} per trade on average. TAKE IT.")
-                elif ev > -0.05:
-                    st.warning(f"⚖️ BREAK-EVEN: EV ${ev:+.2f}. Skip.")
-                else:
-                    st.error(f"❌ NO EDGE: -${abs(ev):.2f} average loss. SKIP THIS.")
+                m3.metric("📊 EV", f"${tm['ev']:+.2f}")
+                if tm['ev'] > 0: st.success(f"✅ POSITIVE EDGE: +${tm['ev']:.2f} per trade.")
+                else: st.error(f"❌ NO EDGE: -${abs(tm['ev']):.2f} per trade.")
             st.markdown("### 📰 News")
             for n in fetch_news(s_sym):
                 st.markdown(f'<div class="news-row"><span class="news-src">{n["source"]}</span><span class="news-title">{n["title"]}</span></div>', unsafe_allow_html=True)
 
-
-def get_fundamentals(t):
-    try:
-        info = yf.Ticker(t).info
-        return {
-            "symbol": t,
-            "name": (info.get("shortName") or t)[:18],
-            "price": info.get("currentPrice") or info.get("regularMarketPrice") or 0,
-            "pe": info.get("trailingPE"),
-            "fwd_pe": info.get("forwardPE"),
-            "rev_growth": info.get("revenueGrowth"),
-            "earn_growth": info.get("earningsGrowth"),
-            "profit_margin": info.get("profitMargins"),
-            "analyst_target": info.get("targetMeanPrice"),
-            "analyst_rec": info.get("recommendationKey", "N/A"),
-            "market_cap": info.get("marketCap") or 0,
-        }
-    except:
-        return None
-
-def score_fund(f):
-    s = 0
-    rg = f.get("rev_growth") or 0
-    eg = f.get("earn_growth") or 0
-    pm = f.get("profit_margin") or 0
-    pe = f.get("pe") or 0
-    tgt = f.get("analyst_target") or 0
-    p = f.get("price") or 0
-    if rg > 0.15: s += 2
-    elif rg > 0.05: s += 1
-    if eg > 0.15: s += 2
-    elif eg > 0.05: s += 1
-    if pm > 0.15: s += 1
-    if tgt and p and tgt > p * 1.15: s += 2
-    if f.get("analyst_rec") in ("buy", "strong_buy"): s += 1
-    if pe and 5 < pe < 40: s += 1
-    return s
-
-def scan_funds():
-    universe = get_universe()
-    results = []
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        futs = {ex.submit(get_fundamentals, t): t for t in universe}
-        for f in as_completed(futs):
-            try:
-                r = f.result(timeout=20)
-                if r and r.get("price") and r.get("market_cap", 0) > 1e9:
-                    r["score"] = score_fund(r)
-                    if r["score"] >= 3:
-                        results.append(r)
-            except:
-                pass
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:30]
-
 with tab3:
     st.header("💰 Fundamentals · Long-Term Quality")
-    st.caption("Scans S&P 500 on revenue growth, earnings growth, margins, analyst upside. This is what actually drives long-term returns.")
+    st.caption("Revenue growth, earnings growth, analyst targets. This is what drives long-term returns.")
     if st.button("🔍 SCAN FUNDAMENTALS", type="primary", key="fscan"):
-        with st.spinner("Pulling fundamentals for 500 stocks — 30 to 60 seconds..."):
+        with st.spinner("Pulling fundamentals for 500 stocks — 30-60 seconds..."):
             results = scan_funds()
         if not results:
-            st.warning("No stocks passed the screen. Market may be closed or data unavailable.")
+            st.warning("No stocks passed the screen.")
         else:
             st.success(f"✅ {len(results)} stocks with strong fundamentals")
             df = pd.DataFrame(results)
@@ -410,16 +361,14 @@ with tab3:
             df["rev_pct"] = (df["rev_growth"].fillna(0) * 100).round(1)
             df["earn_pct"] = (df["earn_growth"].fillna(0) * 100).round(1)
             df["pe"] = df["pe"].fillna(0).round(1)
-            disp = df[["symbol","name","price","score","rev_pct","earn_pct","pe","upside","analyst_rec"]]
-            st.dataframe(disp, use_container_width=True, hide_index=True)
-            st.caption("rev_pct / earn_pct = YoY growth %. upside = % gap to analyst target.")
+            st.dataframe(df[["symbol","name","price","score","rev_pct","earn_pct","pe","upside","analyst_rec"]],
+                         use_container_width=True, hide_index=True)
     st.divider()
-    st.subheader("🔍 Deep Dive on One Ticker")
+    st.subheader("🔍 Deep Dive")
     f_sym = st.text_input("Ticker", "NVDA", key="fsym").upper()
     if st.button("Analyze Fundamentals", key="fa", type="primary"):
         f = get_fundamentals(f_sym)
-        if not f:
-            st.error(f"No fundamentals for {f_sym}")
+        if not f: st.error(f"No fundamentals for {f_sym}")
         else:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Price", f"${f.get('price') or 0:.2f}")
@@ -430,29 +379,15 @@ with tab3:
                 up = (f["analyst_target"] - f["price"]) / f["price"] * 100
                 st.metric("Analyst Target", f"${f['analyst_target']:.2f}", f"{up:+.1f}%")
             st.markdown("### 🧠 What the numbers say")
-            rg = f.get("rev_growth") or 0
-            eg = f.get("earn_growth") or 0
-            pm = f.get("profit_margin") or 0
-            tgt = f.get("analyst_target") or 0
-            p = f.get("price") or 0
-            if rg > 0.15:
-                st.markdown(f"- Revenue up **{rg*100:.0f}%** YoY — business is growing fast")
-            elif rg > 0.05:
-                st.markdown(f"- Revenue up **{rg*100:.0f}%** YoY — steady growth")
-            elif rg < 0:
-                st.markdown(f"- Revenue **down {abs(rg)*100:.0f}%** YoY — business shrinking")
-            if eg > 0.15:
-                st.markdown(f"- Earnings up **{eg*100:.0f}%** YoY — profits expanding")
-            elif eg < -0.05:
-                st.markdown(f"- Earnings **down {abs(eg)*100:.0f}%** YoY — profitability falling")
-            if pm > 0.20:
-                st.markdown(f"- Net margin **{pm*100:.0f}%** — strong pricing power")
+            rg = f.get("rev_growth") or 0; eg = f.get("earn_growth") or 0
+            pm = f.get("profit_margin") or 0; tgt = f.get("analyst_target") or 0; p = f.get("price") or 0
+            if rg > 0.15: st.markdown(f"- Revenue up **{rg*100:.0f}%** YoY — growing fast")
+            elif rg < 0: st.markdown(f"- Revenue **down {abs(rg)*100:.0f}%** YoY — shrinking")
+            if eg > 0.15: st.markdown(f"- Earnings up **{eg*100:.0f}%** YoY — profits expanding")
+            elif eg < -0.05: st.markdown(f"- Earnings **down {abs(eg)*100:.0f}%** YoY — falling")
+            if pm > 0.20: st.markdown(f"- Net margin **{pm*100:.0f}%** — strong pricing power")
             if tgt and p:
                 up = (tgt - p) / p * 100
-                if up > 15:
-                    st.markdown(f"- Analysts see **{up:.0f}% upside** (target ${tgt:.2f}) — Wall Street is bullish")
-                elif up < -10:
-                    st.markdown(f"- Analysts see **{abs(up):.0f}% downside** (target ${tgt:.2f}) — Wall Street is bearish")
-            st.markdown("### ⚠️ What this does NOT say")
-            st.caption("These are facts about the business today. They do not predict tomorrow's price. Even great businesses can drop 30% in a bad market.")
-
+                if up > 15: st.markdown(f"- Analysts see **{up:.0f}% upside** (target ${tgt:.2f})")
+                elif up < -10: st.markdown(f"- Analysts see **{abs(up):.0f}% downside** (target ${tgt:.2f})")
+            st.caption("⚠️ These are facts about the business today. They don't predict tomorrow's price.")
